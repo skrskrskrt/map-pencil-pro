@@ -1,0 +1,347 @@
+<!--
+Map Pencil Pro - index.html
+Modern single-file web app (Leaflet + Leaflet.draw + Turf)
+Features included in this build:
+- Responsive layout with left-side control panel
+- Dark / Light mode toggle
+- Draw polyline (pencil) with live geodesic distance calculation (Turf.js)
+- Distance labels shown on each polyline and live preview while drawing
+- Unit selector (m / km / mi)
+- Edit / Delete / Clear all
+- Export to GeoJSON
+- Save / Load projects using LocalStorage (project name + timestamp)
+- Minimal, clean UI, mobile-friendly
+
+Save this file as index.html and open in a modern browser.
+-->
+
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Map Pencil Pro</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+  <style>
+    :root{
+      --bg:#f6f8fa; --panel:#ffffff; --accent:#1f78b4; --text:#0b1220;
+    }
+    [data-theme="dark"]{
+      --bg:#0b0f13; --panel:#0f1720; --accent:#3aa0ff; --text:#e6eef6;
+    }
+    html,body,#map{height:100%;margin:0}
+    body{font-family:Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", 'Apple SD Gothic Neo', sans-serif;background:var(--bg);color:var(--text)}
+    #app{display:flex;height:100%}
+    /* Left control panel */
+    .panel{width:320px;min-width:240px;background:var(--panel);box-shadow:0 6px 20px rgba(2,6,23,0.12);padding:18px;box-sizing:border-box;overflow:auto}
+    .panel h1{margin:0;font-size:18px;display:flex;align-items:center;gap:10px}
+    .logo-dot{width:36px;height:36px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#2d6fb3);display:inline-block}
+    .subtitle{font-size:13px;color:gray;margin-top:6px}
+    .control-row{display:flex;gap:8px;margin-top:12px;align-items:center}
+    select,input[type=text]{padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,0.08);flex:1}
+    button{padding:8px 10px;border-radius:8px;border:0;background:var(--accent);color:white;font-weight:600;cursor:pointer}
+    button.ghost{background:transparent;color:var(--text);border:1px solid rgba(0,0,0,0.06)}
+    .muted{font-size:13px;color:gray;margin-top:8px}
+    .small{font-size:13px}
+    #map-wrap{flex:1;position:relative}
+    #map{position:absolute;inset:0}
+    .live-measure{margin-top:10px;font-weight:700}
+    .projects{margin-top:12px}
+    .project-item{display:flex;justify-content:space-between;padding:8px;border-radius:8px;margin-top:8px;background:rgba(0,0,0,0.02)}
+    .footer{margin-top:16px;font-size:12px;color:gray}
+    /* mobile */
+    @media (max-width:720px){
+      .panel{position:absolute;z-index:1200;left:12px;top:12px;width:calc(100% - 24px);max-height:50vh;border-radius:12px}
+    }
+    /* label style for polylines */
+    .distance-label{background:rgba(0,0,0,0.7);color:white;padding:4px 6px;border-radius:6px;font-size:12px}
+  </style>
+</head>
+<body data-theme="light">
+  <div id="app">
+    <aside class="panel">
+      <h1><span class="logo-dot" aria-hidden></span>Map Pencil Pro</h1>
+      <div class="subtitle">연필로 그린 선을 실제 거리로 변환하는 도구</div>
+
+      <div class="control-row" style="margin-top:14px">
+        <label for="units" class="small">단위</label>
+        <select id="units" style="width:110px">
+          <option value="m">미터 (m)</option>
+          <option value="km">킬로미터 (km)</option>
+          <option value="mi">마일 (mi)</option>
+        </select>
+        <button id="themeBtn" class="ghost" title="다크/라이트 모드 전환">다크모드</button>
+      </div>
+
+      <div class="live-measure" id="liveMeasure">그려진 길이: 0 m</div>
+
+      <div class="control-row" style="margin-top:12px">
+        <button id="exportBtn">GeoJSON 내보내기</button>
+        <button id="clearBtn" class="ghost">전체 삭제</button>
+      </div>
+
+      <div style="margin-top:12px" class="muted">프로젝트 저장</div>
+      <div class="control-row" style="margin-top:8px">
+        <input id="projectName" placeholder="프로젝트 이름 (선택)"/>
+        <button id="saveBtn" class="ghost">저장</button>
+      </div>
+
+      <div class="projects" id="projectsList">
+        <!-- saved projects will appear here -->
+      </div>
+
+      <div class="footer">버전 1.0 · 외부 라이브러리: Leaflet, Leaflet.draw, Turf.js</div>
+    </aside>
+
+    <div id="map-wrap">
+      <div id="map"></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+  <script>
+    // --- 기본 설정 ---
+    const map = L.map('map', {preferCanvas:true}).setView([37.5665,126.9780],13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+
+    // Feature group
+    const drawnItems = new L.FeatureGroup().addTo(map);
+
+    // Draw control: only polyline
+    const drawCtrl = new L.Control.Draw({
+      edit: { featureGroup: drawnItems },
+      draw: { polygon:false, rectangle:false, circle:false, marker:false, circlemarker:false, polyline:{shapeOptions:{color:'#1f78b4'}} }
+    });
+    map.addControl(drawCtrl);
+
+    // UI elements
+    const unitsSel = document.getElementById('units');
+    const liveMeasure = document.getElementById('liveMeasure');
+    const exportBtn = document.getElementById('exportBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const themeBtn = document.getElementById('themeBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const projectNameInput = document.getElementById('projectName');
+    const projectsList = document.getElementById('projectsList');
+
+    // Helpers: compute distance in meters using turf (geodesic)
+    function metersFromLatLngs(latlngs){
+      if(!latlngs || latlngs.length<2) return 0;
+      const coords = latlngs.map(p=>[p.lng,p.lat]);
+      const line = turf.lineString(coords);
+      const km = turf.length(line,{units:'kilometers'});
+      return km*1000;
+    }
+    function formatLen(meters,unit){
+      if(unit==='m') return `${meters.toFixed(1)} m`;
+      if(unit==='km') return `${(meters/1000).toFixed(3)} km`;
+      if(unit==='mi') return `${(meters/1609.344).toFixed(3)} mi`;
+      return `${meters.toFixed(1)} m`;
+    }
+
+    // Add a label (DivIcon) centered on the polyline
+    function addLabelForPolyline(layer){
+      // remove previous label if exists
+      if(layer.__label) map.removeLayer(layer.__label);
+      const latlngs = layer.getLatLngs();
+      if(!latlngs || latlngs.length<2) return;
+      // compute midpoint along segments (approx by middle vertex)
+      const midIndex = Math.floor(latlngs.length/2);
+      const center = latlngs[midIndex];
+      const meters = metersFromLatLngs(latlngs);
+      const txt = formatLen(meters, unitsSel.value);
+      const div = L.divIcon({className:'distance-label', html: txt, iconSize: null});
+      const lbl = L.marker(center,{icon:div,interactive:false}).addTo(map);
+      layer.__label = lbl;
+    }
+
+    // Update live measure UI for last drawn polyline or total
+    function updateLiveUI(){
+      // show length of last polyline if exists
+      let last = null;
+      drawnItems.eachLayer(l=>{ if(l instanceof L.Polyline) last = l; });
+      if(last){
+        const meters = metersFromLatLngs(last.getLatLngs());
+        liveMeasure.textContent = `그려진 길이: ${formatLen(meters, unitsSel.value)}`;
+      } else {
+        liveMeasure.textContent = `그려진 길이: 0 ${unitsSel.value}`;
+      }
+    }
+
+    // When a shape is created
+    map.on(L.Draw.Event.CREATED, function(e){
+      const layer = e.layer;
+      drawnItems.addLayer(layer);
+      // bind popup with length
+      const meters = metersFromLatLngs(layer.getLatLngs());
+      layer.bindPopup(`길이: ${formatLen(meters, unitsSel.value)}`);
+      addLabelForPolyline(layer);
+      updateLiveUI();
+    });
+
+    // When edited
+    map.on('draw:edited', function(e){
+      e.layers.eachLayer(function(layer){
+        if(layer instanceof L.Polyline){
+          const meters = metersFromLatLngs(layer.getLatLngs());
+          layer.setPopupContent(`길이: ${formatLen(meters, unitsSel.value)}`);
+          addLabelForPolyline(layer);
+        }
+      });
+      updateLiveUI();
+    });
+
+    // When deleted
+    map.on('draw:deleted', function(e){
+      e.layers.eachLayer(function(layer){ if(layer.__label) map.removeLayer(layer.__label); });
+      updateLiveUI();
+    });
+
+    // Click on polyline -> open popup
+    drawnItems.on('click', function(e){
+      const layer = e.layer || e.target;
+      if(layer instanceof L.Polyline){
+        const meters = metersFromLatLngs(layer.getLatLngs());
+        layer.bindPopup(`길이: ${formatLen(meters, unitsSel.value)}`).openPopup();
+      }
+    });
+
+    // Unit change: refresh labels/popups
+    unitsSel.addEventListener('change', function(){
+      drawnItems.eachLayer(function(layer){ if(layer instanceof L.Polyline){ const m=metersFromLatLngs(layer.getLatLngs()); layer.setPopupContent(`길이: ${formatLen(m, unitsSel.value)}`); addLabelForPolyline(layer);} });
+      updateLiveUI();
+    });
+
+    // Export GeoJSON
+    exportBtn.addEventListener('click', function(){
+      const geo = drawnItems.toGeoJSON();
+      const blob = new Blob([JSON.stringify(geo,null,2)],{type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download='map-pencil-pro.geojson'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    });
+
+    // Clear all
+    clearBtn.addEventListener('click', function(){
+      if(!confirm('모든 그려진 선을 삭제하시겠습니까?')) return;
+      drawnItems.eachLayer(function(layer){ if(layer.__label) map.removeLayer(layer.__label); });
+      drawnItems.clearLayers();
+      updateLiveUI();
+    });
+
+    // Theme toggle
+    const body = document.body;
+    themeBtn.addEventListener('click', function(){
+      const isDark = body.getAttribute('data-theme')==='dark';
+      body.setAttribute('data-theme', isDark? 'light' : 'dark');
+      themeBtn.textContent = isDark? '다크모드' : '라이트모드';
+    });
+
+    // --- LocalStorage project save/load ---
+    const STORAGE_KEY = 'mapPencilPro_projects_v1';
+    function loadProjects(){
+      try{
+        const raw = localStorage.getItem(STORAGE_KEY); if(!raw) return [];
+        return JSON.parse(raw);
+      }catch(e){return []}
+    }
+    function saveProjects(list){ localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); renderProjects(); }
+
+    function renderProjects(){
+      const list = loadProjects(); projectsList.innerHTML='';
+      if(!list.length){ projectsList.innerHTML='<div class="muted" style="margin-top:8px">저장된 프로젝트가 없습니다.</div>'; return; }
+      list.slice().reverse().forEach(p=>{
+        const el = document.createElement('div'); el.className='project-item';
+        el.innerHTML = `<div><div style="font-weight:700">${escapeHtml(p.name||'무제 프로젝트')}</div><div class="small muted">${new Date(p.ts).toLocaleString()}</div></div>`;
+        const actions = document.createElement('div');
+        const loadBtn = document.createElement('button'); loadBtn.textContent='불러오기'; loadBtn.className='ghost'; loadBtn.style.marginRight='6px';
+        const delBtn = document.createElement('button'); delBtn.textContent='삭제'; delBtn.className='ghost';
+        actions.appendChild(loadBtn); actions.appendChild(delBtn);
+        el.appendChild(actions);
+        projectsList.appendChild(el);
+        loadBtn.addEventListener('click', ()=>{ if(confirm('이 프로젝트를 불러오면 현재 그림은 덮어씌워집니다. 계속할까요?')) loadProject(p); });
+        delBtn.addEventListener('click', ()=>{ if(confirm('프로젝트를 삭제할까요?')){ deleteProject(p.id); } });
+      });
+    }
+
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;" }[c])); }
+
+    function saveCurrentProject(){
+      const geo = drawnItems.toGeoJSON();
+      const list = loadProjects();
+      const id = 'p_'+Date.now();
+      const name = (projectNameInput.value||'').trim();
+      const obj = {id, name, ts:Date.now(), geo};
+      list.push(obj); saveProjects(list);
+      projectNameInput.value='';
+      alert('프로젝트가 저장되었습니다.');
+    }
+
+    function loadProject(p){
+      drawnItems.eachLayer(function(layer){ if(layer.__label) map.removeLayer(layer.__label); });
+      drawnItems.clearLayers();
+      try{
+        const gj = p.geo;
+        L.geoJSON(gj, {
+          style: ()=>({color:'#1f78b4'}),
+          onEachFeature: function(feature, layer){
+            drawnItems.addLayer(layer);
+            if(layer instanceof L.Polyline) addLabelForPolyline(layer);
+            layer.bindPopup(function(){ const m=metersFromLatLngs(layer.getLatLngs()); return `길이: ${formatLen(m, unitsSel.value)}`; });
+          }
+        });
+      }catch(e){alert('프로젝트 로드 중 문제가 발생했습니다.');}
+      updateLiveUI();
+    }
+
+    function deleteProject(id){
+      const arr = loadProjects().filter(p=>p.id!==id); saveProjects(arr);
+    }
+
+    saveBtn.addEventListener('click', saveCurrentProject);
+
+    // Initialize saved projects UI
+    renderProjects();
+
+    // When page loads, restore last saved project automatically if present? (optional) - keep it simple: do nothing
+
+    // Improve live feedback while drawing
+    map.on('draw:drawstart', function(){ liveMeasure.textContent = `그리는 중...`; });
+
+    // While drawing, Leaflet.Draw emits draw:created at the end; there's no straightforward per-vertex event in all versions,
+    // but we can attach to map's mousemove while draw-in-progress to show preview length if available.
+    let drawing = false;
+    map.on('draw:drawstart', ()=>{ drawing = true; });
+    map.on('draw:drawstop', ()=>{ drawing = false; updateLiveUI(); });
+
+    map.on('mousemove', function(ev){
+      if(!drawing) return;
+      // find the temporary guide polyline used by Leaflet.Draw in map._layers (heuristic)
+      let preview = null;
+      for(const id in map._layers){
+        const l = map._layers[id];
+        if(l && l instanceof L.Polyline && !drawnItems.hasLayer(l) && l._latlngs && l._latlngs.length>1){ preview = l; break; }
+      }
+      if(preview){
+        const m = metersFromLatLngs(preview.getLatLngs());
+        liveMeasure.textContent = `미리보기: ${formatLen(m, unitsSel.value)}`;
+      }
+    });
+
+    // cleanup: when removing a layer through the edit toolbar, remove its label
+    map.on('draw:deleted', function(e){ e.layers.eachLayer(layer=>{ if(layer.__label) map.removeLayer(layer.__label); }); renderProjects(); updateLiveUI(); });
+
+    // Make sure labels update when map zoom/pan (reposition approx center label)
+    map.on('zoomend moveend', function(){ drawnItems.eachLayer(function(layer){ if(layer instanceof L.Polyline) addLabelForPolyline(layer); }); });
+
+    // Accessibility: keyboard shortcut for export (E)
+    document.addEventListener('keydown', function(e){ if(e.key==='e' || e.key==='E'){ exportBtn.click(); } });
+
+    // Done
+    updateLiveUI();
+  </script>
+</body>
+</html>
